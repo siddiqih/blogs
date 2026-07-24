@@ -1,0 +1,122 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Orchestrating a Fleet of AI Coding Agents with GitHub as the Control Plane</title>
+<meta name="description" content="Most people use AI coding assistants one conversation at a time: ask a question, get some code, paste it in. I wanted something different. I'm building Helix, a multi-tenant CRM an">
+<style>
+:root { --bg:#ffffff; --fg:#1a1a1a; --muted:#6b6b6b; --accent:#0f62fe; --code:#f4f4f4; --border:#e6e6e6; }
+@media (prefers-color-scheme: dark) {
+  :root { --bg:#121212; --fg:#e8e8e8; --muted:#9a9a9a; --accent:#78a9ff; --code:#1e1e1e; --border:#2a2a2a; }
+}
+* { box-sizing:border-box; }
+body { margin:0; background:var(--bg); color:var(--fg);
+  font-family:Georgia,'Times New Roman',serif; font-size:1.125rem; line-height:1.75; }
+header.site { font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
+  border-bottom:1px solid var(--border); padding:14px 20px; }
+header.site a { color:var(--fg); text-decoration:none; font-weight:700; letter-spacing:.02em; }
+header.site span { color:var(--muted); font-weight:400; }
+main { max-width:680px; margin:0 auto; padding:32px 20px 80px; }
+h1 { font-size:2rem; line-height:1.25; margin:0 0 .4em; }
+h2 { font-size:1.45rem; margin-top:2em; line-height:1.3; }
+h3 { font-size:1.15rem; margin-top:1.6em; }
+p, li { letter-spacing:.003em; }
+a { color:var(--accent); }
+blockquote { margin:1.5em 0; padding-left:1em; border-left:3px solid var(--fg);
+  font-style:italic; color:var(--muted); }
+hr { border:none; border-top:1px solid var(--border); margin:2.5em 0; }
+code { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:.85em;
+  background:var(--code); padding:.15em .35em; border-radius:4px; }
+pre { background:var(--code); border:1px solid var(--border); border-radius:8px;
+  padding:16px; overflow-x:auto; line-height:1.5; }
+pre code { background:none; padding:0; font-size:.8em; }
+table { border-collapse:collapse; width:100%; font-size:.9em;
+  font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif; }
+th, td { border:1px solid var(--border); padding:8px 12px; text-align:left; }
+th { background:var(--code); }
+.byline { font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
+  color:var(--muted); font-size:.9rem; margin-bottom:2.5em; }
+.card { display:block; border:1px solid var(--border); border-radius:12px;
+  padding:20px 24px; margin:16px 0; text-decoration:none; color:var(--fg); }
+.card:hover { border-color:var(--accent); }
+.card h2 { margin:0 0 .3em; font-size:1.3rem; }
+.card p { margin:0; color:var(--muted); font-size:1rem; }
+footer { font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
+  color:var(--muted); font-size:.85rem; text-align:center; padding:24px;
+  border-top:1px solid var(--border); }
+</style>
+</head>
+<body>
+<header class="site"><a href="index.html">Engineering Notes</a> <span>· MarketingOrchestration.io</span></header>
+<main>
+<p class="byline">Hassan Siddiqi · July 2026 · Field notes from building Helix</p><h1>Orchestrating a Fleet of AI Coding Agents with GitHub as the Control Plane</h1>
+<p><em>How I run six autonomous AI engineers around the clock — with heartbeats, task queues, and kill switches built entirely out of a Git repository.</em></p>
+<hr />
+<p>Most people use AI coding assistants one conversation at a time: ask a question, get some code, paste it in. I wanted something different. I'm building <strong>Helix</strong>, a multi-tenant CRM and customer-data platform, and the backlog was far bigger than one person — or one AI chat window — could handle.</p>
+<p>So I built a fleet: <strong>six AI coding agents ("nodes") running on separate machines, working the backlog 24/7</strong>, coordinated by one lead agent and supervised by me. In its busiest sprint, the fleet and its lead shipped a full visual flow-builder canvas — six coordinated pull requests, all reviewed, tested, and merged to production — in under 24 hours.</p>
+<p>The most surprising design decision: <strong>the entire orchestration layer is just GitHub.</strong> No Kubernetes, no message broker, no custom control server. Issues, branches, labels, and JSON files in a repo. Here's how it works, and why that constraint turned out to be a feature.</p>
+<h2>Why GitHub as the control plane?</h2>
+<p>When you coordinate autonomous agents, you need four things:</p>
+<ol>
+<li><strong>A task queue</strong> — what should each agent work on next?</li>
+<li><strong>Health monitoring</strong> — is each agent alive, and what is it doing?</li>
+<li><strong>A kill switch</strong> — how do you stop everything <em>right now</em>?</li>
+<li><strong>An audit trail</strong> — who did what, when, and why?</li>
+</ol>
+<p>Every one of those is something GitHub already does, if you squint:</p>
+<ul>
+<li>The task queue is <strong>issues with labels</strong>. A task is an issue labeled <code>node-task</code> with a role label (<code>role:backend-swe</code>, <code>role:frontend-swe</code>, <code>role:qa-engineer</code>…) and a priority. Assignment is a comment on a control issue. Retries are a label (<code>node-retry:1</code>). Escalation to a human is a label (<code>needs-human</code>).</li>
+<li>Health monitoring is <strong>heartbeat files on a dedicated branch</strong>. Every node commits a small JSON file to a <code>node-status</code> branch every few minutes:</li>
+</ul>
+<pre><code class="language-json">{
+  &quot;node_id&quot;: &quot;node3&quot;,
+  &quot;status&quot;: &quot;idle&quot;,
+  &quot;timestamp&quot;: &quot;2026-07-23T16:02:12Z&quot;,
+  &quot;task&quot;: null,
+  &quot;agent_runner_version&quot;: &quot;f230c4a0b5&quot;
+}
+</code></pre>
+<p>Checking fleet health is one command: <code>git show origin/node-status:heartbeats/node3.json</code>. No dashboards to host, no metrics stack — and the <em>history</em> of every heartbeat is preserved for free, because it's Git.</p>
+<ul>
+<li>The kill switch is <strong>a label on a pinned issue</strong>. Each repo has a "Node Control Center" issue; adding the <code>nodes-paused</code> label halts the entire fleet. Any maintainer can do it from a phone.</li>
+<li>The audit trail is the one you already have: <strong>commits, pull requests, and reviews</strong>. Nothing an agent does is invisible, because the only way an agent can affect anything is through Git.</li>
+</ul>
+<p>That last point is the real insight. Message brokers and custom control planes create <em>side channels</em> — ways for agents to act that don't leave a reviewable trace. When Git is the only interface, <strong>every action an agent takes is inherently versioned, attributable, and reversible.</strong></p>
+<h2>The cast: nodes, a lead, and a human</h2>
+<p>The fleet has three tiers, and the separation of powers matters more than the automation.</p>
+<p><strong>The nodes (node1–node5 + core)</strong> are the workhorses. Each runs a daemon that wakes on a schedule, reads its assignment from the control issue, pulls the latest main, does the work — Django models, React pages, tests — and opens a pull request. Nodes have role definitions (backend engineer, frontend engineer, QA engineer, reviewer) that scope what they're allowed to touch. A node's version field in its heartbeat tells me exactly which commit of the runner it's on, so a stale node is visible within minutes.</p>
+<p><strong>The lead agent</strong> (my day-to-day collaborator) does what a tech lead does: breaks epics into node-sized issues with pinned interface contracts, reviews every node PR against acceptance criteria, <em>fixes</em> problems directly rather than bouncing work back, and drives each PR through the release gates. One rule I enforce: <strong>shared contracts flow one way.</strong> When six agents build parts of one feature, the lead publishes the TypeScript interfaces first; fleet PRs import them and are forbidden from altering them. That single rule eliminated almost every integration conflict.</p>
+<p><strong>The human (me)</strong> sets priorities, makes architectural calls, and holds the approvals that never get delegated: production credentials, anything that spends money, and the final review gate. The system is designed so I can steer it from a phone — which is not a gimmick, it's the requirement. Fleet check-ins happen hourly whether I'm at a desk or not.</p>
+<h2>What a task's life looks like</h2>
+<ol>
+<li>I write one line: <em>"Build the per-node autonomy stats endpoint."</em></li>
+<li>The lead expands it into an issue: acceptance criteria, the exact API contract, the files in play, the test expectations — and assigns it via the control issue.</li>
+<li>A node picks it up on its next wake, builds it on a feature branch, opens a PR.</li>
+<li>Continuous integration runs the full test suite. If it fails, the <em>lead</em> diagnoses and pushes fixes to the node's branch — the node's job is throughput, the lead's job is integrity.</li>
+<li>The PR walks through a five-gate review pipeline (that pipeline is its own story — see my post on minimizing AI hallucinations) and merges.</li>
+<li>Every node's next heartbeat reports the new main-branch version, confirming the whole fleet self-updated.</li>
+</ol>
+<p>The economics are what you'd hope: nodes handle the parallelizable 70% — CRUD endpoints, UI panes, test suites — while the lead concentrates on the 30% where mistakes compound: money-handling code paths, migration safety, cross-cutting contracts.</p>
+<h2>What went wrong (and what it taught me)</h2>
+<p>An honest orchestration story includes the failures:</p>
+<ul>
+<li><strong>Runaway side effects.</strong> Early on, the heartbeat commits themselves triggered 62,000 preview builds in our hosting pipeline, starving production deploys. Lesson: the control plane's own traffic needs the same scrutiny as application traffic. We scoped build triggers to real code paths and the queue vanished.</li>
+<li><strong>Silent capability gaps.</strong> A node "completed" a task that quietly did nothing because a background task module was never imported by the worker process. The heartbeats were green; the feature was dead. Lesson: green health checks tell you the agent is alive, not that the work is real — which is exactly why the review pipeline demands <em>evidence</em>, not status.</li>
+<li><strong>Duplicate work.</strong> Two different queue entries described the same feature written two ways; a node rebuilt something that had shipped weeks earlier. Lesson: the lead now reconciles the queue against the codebase before dispatching, not after.</li>
+</ul>
+<h2>Why this matters beyond my project</h2>
+<p>The pattern generalizes to any team experimenting with autonomous AI development:</p>
+<ul>
+<li><strong>Use infrastructure you already trust.</strong> Your VCS is a distributed, authenticated, audit-logged database with a permission model your whole team understands. Start there before you build a bespoke agent platform.</li>
+<li><strong>Make the only interface a reviewable one.</strong> Agents that can only act through pull requests can never act invisibly.</li>
+<li><strong>Separate throughput from integrity.</strong> Many cheap agents generating work, one strong agent verifying it, one human owning judgment. Each tier checks the one below.</li>
+<li><strong>Design for the pocket.</strong> If you can't pause the fleet, read its health, and approve its output from a phone, you don't control it — you cohabit with it.</li>
+</ul>
+<p>Six agents, one repository, zero custom infrastructure. The future of software teams might look less like more headcount, and more like better orchestration.</p>
+<hr />
+<p><em>I'm building Helix at MarketingOrchestration.io. The companion posts cover the <a href="minimizing-ai-hallucinations-5-gate-pipeline.html">five-gate pipeline that keeps AI hallucinations out of production</a> and <a href="inbound-ai-calls-twilio-deepgram-cartesia.html">the AI phone line we built with Twilio, Deepgram, and Cartesia</a>.</em></p>
+</main>
+<footer>© 2026 Hassan Siddiqi · MarketingOrchestration.io · <a href="https://github.com/siddiqih/blogs">source</a></footer>
+</body>
+</html>

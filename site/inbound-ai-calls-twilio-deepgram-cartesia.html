@@ -1,0 +1,162 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Building an Inbound AI Call Line with Twilio, Deepgram, and Cartesia</title>
+<meta name="description" content="Voice is the last unautomated front door of most businesses. Web forms feed your CRM, email gets filtered and routed — but the phone still rings until a human picks up, and every m">
+<style>
+:root { --bg:#ffffff; --fg:#1a1a1a; --muted:#6b6b6b; --accent:#0f62fe; --code:#f4f4f4; --border:#e6e6e6; }
+@media (prefers-color-scheme: dark) {
+  :root { --bg:#121212; --fg:#e8e8e8; --muted:#9a9a9a; --accent:#78a9ff; --code:#1e1e1e; --border:#2a2a2a; }
+}
+* { box-sizing:border-box; }
+body { margin:0; background:var(--bg); color:var(--fg);
+  font-family:Georgia,'Times New Roman',serif; font-size:1.125rem; line-height:1.75; }
+header.site { font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
+  border-bottom:1px solid var(--border); padding:14px 20px; }
+header.site a { color:var(--fg); text-decoration:none; font-weight:700; letter-spacing:.02em; }
+header.site span { color:var(--muted); font-weight:400; }
+main { max-width:680px; margin:0 auto; padding:32px 20px 80px; }
+h1 { font-size:2rem; line-height:1.25; margin:0 0 .4em; }
+h2 { font-size:1.45rem; margin-top:2em; line-height:1.3; }
+h3 { font-size:1.15rem; margin-top:1.6em; }
+p, li { letter-spacing:.003em; }
+a { color:var(--accent); }
+blockquote { margin:1.5em 0; padding-left:1em; border-left:3px solid var(--fg);
+  font-style:italic; color:var(--muted); }
+hr { border:none; border-top:1px solid var(--border); margin:2.5em 0; }
+code { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:.85em;
+  background:var(--code); padding:.15em .35em; border-radius:4px; }
+pre { background:var(--code); border:1px solid var(--border); border-radius:8px;
+  padding:16px; overflow-x:auto; line-height:1.5; }
+pre code { background:none; padding:0; font-size:.8em; }
+table { border-collapse:collapse; width:100%; font-size:.9em;
+  font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif; }
+th, td { border:1px solid var(--border); padding:8px 12px; text-align:left; }
+th { background:var(--code); }
+.byline { font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
+  color:var(--muted); font-size:.9rem; margin-bottom:2.5em; }
+.card { display:block; border:1px solid var(--border); border-radius:12px;
+  padding:20px 24px; margin:16px 0; text-decoration:none; color:var(--fg); }
+.card:hover { border-color:var(--accent); }
+.card h2 { margin:0 0 .3em; font-size:1.3rem; }
+.card p { margin:0; color:var(--muted); font-size:1rem; }
+footer { font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
+  color:var(--muted); font-size:.85rem; text-align:center; padding:24px;
+  border-top:1px solid var(--border); }
+</style>
+</head>
+<body>
+<header class="site"><a href="index.html">Engineering Notes</a> <span>· MarketingOrchestration.io</span></header>
+<main>
+<p class="byline">Hassan Siddiqi · July 2026 · Field notes from building Helix</p><h1>Building an Inbound AI Call Line with Twilio, Deepgram, and Cartesia</h1>
+<p><em>A caller dials your business number. An AI answers, understands, routes, takes action in your CRM, and hands off to a human exactly when it should. Here's the architecture, end to end.</em></p>
+<hr />
+<p>Voice is the last unautomated front door of most businesses. Web forms feed your CRM, email gets filtered and routed — but the phone still rings until a human picks up, and every missed call is a missed lead or an unhappy customer.</p>
+<p>For <strong>Helix</strong>, the CRM/customer-data platform I'm building, I wanted the phone to be a first-class, automated channel: an AI receptionist that answers instantly, figures out who's calling and why, does real work (opens tickets, qualifies leads, books follow-ups), and escalates to humans with full context. This post walks through the stack that makes it work — <strong>Twilio for telephony, Deepgram for speech-to-text, Cartesia for text-to-speech</strong> — and the engineering decisions that matter more than the vendor list.</p>
+<h2>The pipeline at a glance</h2>
+<pre><code>Caller
+  │  (PSTN)
+  ▼
+Twilio  ──── media stream (WebSocket, 8kHz μ-law audio) ────►  Voice service
+                                                                 │
+                              ┌──────────────────────────────────┤
+                              ▼                                  ▼
+                    Deepgram (streaming STT)              Flow engine (the &quot;brain&quot;)
+                    partial + final transcripts           intent routing, CRM actions,
+                              │                           human-approval gates
+                              └────────────► LLM turn ◄──────────┘
+                                                │
+                                                ▼
+                                     Cartesia (streaming TTS)
+                                                │
+Twilio ◄──── synthesized audio frames ──────────┘
+  │
+  ▼
+Caller hears the reply  (target: under ~1 second after they stop talking)
+</code></pre>
+<p>Three specialized vendors, one WebSocket each, and your own service in the middle. The vendors are swappable; the middle is where the product lives.</p>
+<h2>Step 1: Twilio — get the audio as a stream, not a recording</h2>
+<p>Point your Twilio number's webhook at your service. Instead of the classic "record a voicemail" pattern, respond with TwiML that opens a <strong>bidirectional media stream</strong>:</p>
+<pre><code class="language-xml">&lt;Response&gt;
+  &lt;Connect&gt;
+    &lt;Stream url=&quot;wss://voice.yourdomain.com/twilio/media&quot; /&gt;
+  &lt;/Connect&gt;
+&lt;/Response&gt;
+</code></pre>
+<p>From that moment, Twilio sends you the caller's audio as base64 μ-law frames over a WebSocket, and plays back any audio you send on the same socket. This is the decision that makes everything else possible: <strong>you're now in a real-time conversation loop, not a request/response IVR.</strong> Keep the call SID — it's your correlation key for everything downstream.</p>
+<h2>Step 2: Deepgram — words while they're still being spoken</h2>
+<p>Forward the audio frames straight into Deepgram's streaming API. Two features matter enormously:</p>
+<ul>
+<li><strong>Interim results.</strong> You receive partial transcripts while the caller is mid-sentence. You can't act on them yet, but they let you <em>prepare</em> — warm the next model call, prefetch the CRM record for a spoken email address.</li>
+<li><strong>Endpointing.</strong> Deepgram tells you when the speaker has finished a thought (<code>speech_final</code>). That signal — not a fixed silence timer — is when your agent should start thinking. Get this wrong and your AI either interrupts callers or leaves awkward three-second gaps. Tune the endpointing window (~300ms works for us) before you tune anything else.</li>
+</ul>
+<h2>Step 3: The brain — a flow graph, not one giant prompt</h2>
+<p>Here's where most tutorials stop ("...then send the transcript to an LLM") and where real systems begin. A production call can't run on vibes; it runs on a <strong>flow definition</strong> — a graph our engine executes per call:</p>
+<pre><code>[trigger: inbound_call]
+        │
+        ▼
+[intent_router]  &quot;Why are you calling?&quot;
+   ├─ existing_customer/support ──► [agent: triage] ──► [action: open_ticket] ──► [human_task: support queue w/ SLA]
+   ├─ new_prospect ──────────────► [agent: qualify] ──► [action: create_lead] ──► [enroll_journey: sales follow-up]
+   └─ anything_else ─────────────► [human_checkpoint: warm transfer]
+</code></pre>
+<p>The LLM does what it's uniquely good for — understanding messy human speech and choosing among <em>declared</em> outcomes — while the graph guarantees what the business needs guaranteed:</p>
+<ul>
+<li><strong>Every agent node must declare its possible outcomes, and <code>escalate_human</code> is mandatory.</strong> The AI always has a structured way to give up. Schema validation rejects any flow where it doesn't.</li>
+<li><strong>Consequential actions pass a gate.</strong> Anything irreversible or money-touching (issuing a refund, sending a contract) runs through a human-approval checkpoint. The call doesn't stall — the AI tells the caller "you'll get a confirmation shortly," the flow <em>pauses</em>, and a human approves or denies from a queue. On approval, the flow resumes exactly where it paused.</li>
+<li><strong>Everything is ledgered.</strong> Every node execution — transcript in, decision out, cost, latency — lands in an audit ledger. When a customer says "your AI told me X," you can replay the call decision by decision.</li>
+</ul>
+<p>The unglamorous part that took real engineering: <strong>call completion resumes the flow.</strong> When Twilio reports the call ended, a webhook advances the paused flow instance — so post-call work (logging the outcome, scheduling the follow-up, emailing the transcript) runs automatically, and busy/no-answer/failed calls each take their own explicit path instead of leaving zombie state.</p>
+<h2>Step 4: Cartesia — a voice fast enough to feel human</h2>
+<p>Text-to-speech quality is judged in your first second, not your best sentence. Cartesia's streaming synthesis returns first audio in tens of milliseconds, which enables the trick that makes the whole thing feel alive: <strong>stream the LLM's reply into TTS sentence-by-sentence as it's generated.</strong> The caller hears the beginning of the answer while the rest is still being written. Total silence between caller and reply stays around a second — inside the rhythm of human conversation.</p>
+<p>Convert Cartesia's output to 8kHz μ-law, chunk it into frames, and write it back down the Twilio socket. One more essential detail: <strong>barge-in.</strong> If Deepgram detects the caller speaking while your audio is playing, stop sending frames immediately and clear Twilio's buffer. An AI that talks over people gets hung up on.</p>
+<h2>The latency budget</h2>
+<p>Everything above is in service of one number — the pause after the caller stops talking:</p>
+<table>
+<thead>
+<tr>
+<th>Stage</th>
+<th>Budget</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Endpoint detection</td>
+<td>~300 ms</td>
+</tr>
+<tr>
+<td>LLM first token (fast model for routing turns)</td>
+<td>~350 ms</td>
+</tr>
+<tr>
+<td>TTS first audio</td>
+<td>~100 ms</td>
+</tr>
+<tr>
+<td>Network + framing</td>
+<td>~150 ms</td>
+</tr>
+<tr>
+<td><strong>Caller-perceived pause</strong></td>
+<td><strong>~0.9 s</strong></td>
+</tr>
+</tbody>
+</table>
+<p>Two practical notes. Use a <em>fast</em> model for conversational turns and save your deepest model for the analysis steps that happen off the critical path. And measure the pause from the caller's side (call yourself and record it) — server-side numbers always flatter you.</p>
+<h2>What I'd tell you to build first</h2>
+<ol>
+<li><strong>The echo skeleton</strong> — Twilio stream in, same audio out. Proves your socket plumbing.</li>
+<li><strong>The transcript loop</strong> — Deepgram in the middle, print live transcripts. Tune endpointing here.</li>
+<li><strong>A two-node flow</strong> — intent router with <code>support</code>/<code>sales</code>/<code>escalate_human</code>, canned replies through Cartesia. This is already a useful receptionist.</li>
+<li><strong>Real actions behind gates</strong> — CRM writes, tickets with SLAs, human approval for anything consequential. This is where a demo becomes a system you can trust with customers.</li>
+<li><strong>The failure matrix</strong> — busy, no-answer, mid-call hangup, vendor timeout. Each gets an explicit, tested path. Voice reliability is entirely about the unhappy paths.</li>
+</ol>
+<p>The vendors will keep leapfrogging each other on quality and price — architecture outlives them. Put a real flow engine with declared outcomes, approval gates, and an audit ledger in the middle, and the phone stops being your least automated channel and becomes your most accountable one.</p>
+<hr />
+<p><em>Part of a series on building Helix at MarketingOrchestration.io: <a href="orchestrating-a-fleet-of-ai-coding-agents.html">orchestrating a fleet of AI coding agents</a> · <a href="minimizing-ai-hallucinations-5-gate-pipeline.html">the 5-gate pipeline that keeps AI hallucinations out of production</a>.</em></p>
+</main>
+<footer>© 2026 Hassan Siddiqi · MarketingOrchestration.io · <a href="https://github.com/siddiqih/blogs">source</a></footer>
+</body>
+</html>

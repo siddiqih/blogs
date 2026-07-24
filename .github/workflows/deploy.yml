@@ -1,0 +1,28 @@
+name: Deploy blog to Cloudflare Pages
+
+# site/ is committed (build.py output), so deploy is a direct upload — no
+# build step, no preview-queue exposure. Same wrangler pattern as the helix
+# frontend pipeline.
+on:
+  push:
+    branches: [main]
+
+concurrency:
+  group: deploy-blogs
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Deploy site/ to Cloudflare Pages
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: aac4692b653cb54a9a61f2d2ad812c4f
+        run: |
+          npx wrangler@4 pages deploy site \
+            --project-name=blogs \
+            --branch=main

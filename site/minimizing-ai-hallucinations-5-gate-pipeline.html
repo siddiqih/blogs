@@ -1,0 +1,106 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Minimizing AI Hallucinations in Production Code: the 5-Gate Pipeline</title>
+<meta name="description" content="Ask anyone who has used AI to write serious software and they'll tell you the same uncomfortable truth: the failure mode isn't bad code — it's confident code. An AI agent will tell">
+<style>
+:root { --bg:#ffffff; --fg:#1a1a1a; --muted:#6b6b6b; --accent:#0f62fe; --code:#f4f4f4; --border:#e6e6e6; }
+@media (prefers-color-scheme: dark) {
+  :root { --bg:#121212; --fg:#e8e8e8; --muted:#9a9a9a; --accent:#78a9ff; --code:#1e1e1e; --border:#2a2a2a; }
+}
+* { box-sizing:border-box; }
+body { margin:0; background:var(--bg); color:var(--fg);
+  font-family:Georgia,'Times New Roman',serif; font-size:1.125rem; line-height:1.75; }
+header.site { font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
+  border-bottom:1px solid var(--border); padding:14px 20px; }
+header.site a { color:var(--fg); text-decoration:none; font-weight:700; letter-spacing:.02em; }
+header.site span { color:var(--muted); font-weight:400; }
+main { max-width:680px; margin:0 auto; padding:32px 20px 80px; }
+h1 { font-size:2rem; line-height:1.25; margin:0 0 .4em; }
+h2 { font-size:1.45rem; margin-top:2em; line-height:1.3; }
+h3 { font-size:1.15rem; margin-top:1.6em; }
+p, li { letter-spacing:.003em; }
+a { color:var(--accent); }
+blockquote { margin:1.5em 0; padding-left:1em; border-left:3px solid var(--fg);
+  font-style:italic; color:var(--muted); }
+hr { border:none; border-top:1px solid var(--border); margin:2.5em 0; }
+code { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:.85em;
+  background:var(--code); padding:.15em .35em; border-radius:4px; }
+pre { background:var(--code); border:1px solid var(--border); border-radius:8px;
+  padding:16px; overflow-x:auto; line-height:1.5; }
+pre code { background:none; padding:0; font-size:.8em; }
+table { border-collapse:collapse; width:100%; font-size:.9em;
+  font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif; }
+th, td { border:1px solid var(--border); padding:8px 12px; text-align:left; }
+th { background:var(--code); }
+.byline { font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
+  color:var(--muted); font-size:.9rem; margin-bottom:2.5em; }
+.card { display:block; border:1px solid var(--border); border-radius:12px;
+  padding:20px 24px; margin:16px 0; text-decoration:none; color:var(--fg); }
+.card:hover { border-color:var(--accent); }
+.card h2 { margin:0 0 .3em; font-size:1.3rem; }
+.card p { margin:0; color:var(--muted); font-size:1rem; }
+footer { font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
+  color:var(--muted); font-size:.85rem; text-align:center; padding:24px;
+  border-top:1px solid var(--border); }
+</style>
+</head>
+<body>
+<header class="site"><a href="index.html">Engineering Notes</a> <span>· MarketingOrchestration.io</span></header>
+<main>
+<p class="byline">Hassan Siddiqi · July 2026 · Field notes from building Helix</p><h1>Minimizing AI Hallucinations in Production Code: the 5-Gate Pipeline</h1>
+<p><em>AI agents write most of my platform's code. Here's the Git-native review pipeline that catches their confident mistakes before customers ever see them.</em></p>
+<hr />
+<p>Ask anyone who has used AI to write serious software and they'll tell you the same uncomfortable truth: <strong>the failure mode isn't bad code — it's confident code.</strong> An AI agent will tell you the feature works, describe the tests it "ran," and summarize a job well done. Sometimes all of that is true. Sometimes none of it is. The summary reads identically either way.</p>
+<p>That's what "hallucination" means in a software context. Not a chatbot inventing a fake citation — an agent <em>believing its own work is finished when it isn't</em>.</p>
+<p>I run a fleet of AI coding agents building <strong>Helix</strong>, a CRM/customer-data platform (see my post on <a href="orchestrating-a-fleet-of-ai-coding-agents.html">orchestrating the fleet</a>). Early on I accepted a premise that changed the whole design: <strong>you cannot prompt hallucination away — you have to build a system where hallucinations can't reach production.</strong> My answer is a five-gate pipeline, implemented entirely with Git branch protection and CI, that every single pull request must survive. No exceptions, including for me.</p>
+<h2>The core principle: evidence, not assertion</h2>
+<p>One sentence governs the whole pipeline:</p>
+<blockquote>
+<p><strong>"Code merged" is never "done." An item is done only when every claim about it is backed by evidence — a test run, a log entry, a screenshot, or an API response — attached to the pull request.</strong></p>
+</blockquote>
+<p>An AI saying "the tests pass" is an assertion. A CI job that ran the tests and posted the green check is evidence. The pipeline's job is to convert every assertion into evidence or block the merge. Each gate exists because assertions and reality can diverge in a different way.</p>
+<h2>The five gates</h2>
+<p><strong>Gate 1 — Continuous integration (machines check the basics).</strong>
+Every PR triggers unit tests, type checking, linting, and secret scanning. This is table stakes, but note what it does to hallucinations: an agent <em>cannot</em> claim the build passes — the build passes or the PR is red. About a third of all hallucinated "done" claims die right here, cheaply, in ten minutes.</p>
+<p><strong>Gate 2 — L1 technical review (an AI checks the AI).</strong>
+A dedicated reviewer agent — a different agent from the author, with a different role prompt — reads the diff against the task's written acceptance criteria: logic errors, missed edge cases, security issues, tests that assert nothing. Using an AI to review an AI sounds circular, but it works for the same reason human peer review works: <strong>the author's blind spots and the reviewer's blind spots are rarely the same.</strong> The reviewer never has the author's motivated reasoning about its own work.</p>
+<p><strong>Gate 3 — L2 architectural review (a human checks the design).</strong>
+A human maintainer reviews what machines are worst at judging: does this belong in the architecture? Does it create a coupling we'll regret? Should this exist at all? Note the ordering — the human reviews <em>after</em> the machines have burned down the mechanical errors, so human attention goes where human judgment is actually needed.</p>
+<p><strong>Gate 4 — Full regression suite (the whole system, not just the diff).</strong>
+The entire test suite — every module, ~everything the platform does — runs against the PR with a hard coverage floor. This gate exists because the most dangerous AI mistakes aren't in the code the agent wrote; they're in the code it <em>broke three files away</em>. A diff-scoped review can't see that. A thousand tests can.</p>
+<p><strong>Gate 5 — QA sign-off with published evidence.</strong>
+Last, a sign-off comment must be posted on the PR before a verification job will go green. The comment isn't a rubber stamp — it's a structured evidence dossier: which tests cover which acceptance criterion, what the failure-path behavior is, what was deliberately deferred. The gate is enforced by branch protection: no evidence comment, no merge. It's the pipeline's way of forcing someone — human or agent — to <em>write down the proof</em> while it's fresh, where auditors (or future debuggers) can find it.</p>
+<h2>Does it actually catch anything?</h2>
+<p>In one 24-hour sprint, this pipeline caught three real bugs in AI-authored code that had sailed through the authoring agent's own testing — each one a textbook hallucination:</p>
+<ol>
+<li>
+<p><strong>A fail-open safety guard.</strong> A guard was supposed to <em>block</em> AI autonomy around money-touching actions when classification failed. The submitted code caught all exceptions and returned "not money-class" — meaning any internal error would silently <em>widen</em> AI autonomy over spending. The author's summary said the guard was implemented. It was — backwards. Review at Gate 2/3 caught it; the fix inverted it to fail-closed with tests proving both failure paths.</p>
+</li>
+<li>
+<p><strong>A rounding assumption.</strong> A statistics endpoint expected <code>round(98.5)</code> to be <code>99</code>. Python uses banker's rounding; it's <code>98</code>. The agent's hand-written test encoded its own wrong belief — the full-suite gate surfaced the contradiction.</p>
+</li>
+<li>
+<p><strong>A guardrail keyed on a value that was always null.</strong> A rate-limiting cooldown was keyed on a profile ID that, in the code path being shipped, was never populated — so the cooldown could never engage. Everything compiled; every local test passed; the feature was a no-op. Only review against the <em>written acceptance criteria</em> ("cooldown must dedupe repeat firings per profile") exposed it.</p>
+</li>
+</ol>
+<p>None of these were exotic. All of them were the kind of thing a confident summary glosses over. That's the point.</p>
+<h2>Why Git-native matters</h2>
+<p>The pipeline needs no custom infrastructure — it's branch protection rules, CI workflows, labels, and PR comments. That has three consequences I now consider non-negotiable:</p>
+<ul>
+<li><strong>It cannot be bypassed by an agent</strong>, because the enforcement lives in the platform, not in the agent's instructions. A prompt can be ignored; a required status check cannot.</li>
+<li><strong>The evidence is permanent and public</strong> (to the team). Every sign-off dossier lives on its PR forever. When something breaks in production, the first question — <em>what did we actually verify?</em> — has a written answer.</li>
+<li><strong>It's adoptable in an afternoon.</strong> Any team on GitHub/GitLab can implement gates 1, 4, and 5 today with protection rules; gates 2 and 3 are a reviewer agent and a human rota.</li>
+</ul>
+<h2>The deeper lesson</h2>
+<p>We spend a lot of energy trying to make AI models hallucinate less. That work matters, but for software teams it's the wrong end of the problem. Aviation didn't get safe by producing pilots who never err; it got safe with checklists, cross-checks, and instruments that don't take the pilot's word for anything.</p>
+<p>Treat AI coding agents the same way. Let them be fast and fallible — and build the system that demands evidence at every door. My fleet merges AI-written code to a production system many times a day, and I sleep fine. Not because the agents stopped hallucinating.</p>
+<p>Because hallucinations stopped mattering.</p>
+<hr />
+<p><em>Part of a series on building Helix at MarketingOrchestration.io: <a href="orchestrating-a-fleet-of-ai-coding-agents.html">orchestrating a fleet of AI coding agents</a> · <a href="inbound-ai-calls-twilio-deepgram-cartesia.html">building an inbound AI call line</a>.</em></p>
+</main>
+<footer>© 2026 Hassan Siddiqi · MarketingOrchestration.io · <a href="https://github.com/siddiqih/blogs">source</a></footer>
+</body>
+</html>
